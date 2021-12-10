@@ -67,4 +67,72 @@ Use the following command:
 
 Add the IP addresses of the servers we want to manage.
 
+```plaintext
+192.168.XXX.XXX
+192.168.XXX.XYZ
+```
+
+To make sure ansible is working use the following command:
+
+`ansible all --key-file ~/.ssh/ansible -i inventory -m ping`
+
+Now we are going to create an ansible config file to automate the use of our ssh key and the use of our inventory file.
+
+-   create the .cfg file inside the ansible folder:
+
+`nano ansible.cfg`
+
+-   add the defaults using the following:
+
+```plaintext
+[defaults]
+inventory = inventory
+private_key_file = ~/.ssh/ansible
+```
+
+The creation of this file inside the ansible folder will override the ansible.cfg file that's inside /etc/ansible and it will create a mush personalize configuration for the admin. Now we can omit the ssh key and inventory file when we use or ansible commands.
+
+`ansible all -m ping`
+
+> ansible usefull commands to view hosts:
+> 
+> ```plaintext
+> ansible all --list-hosts #list hosts 
+> ansible all -m gather_facts #ghater facts about hosts
+> ansible all -m gather_facts --limit 192.168.XXX.XXX # limit to just one host
+> ```
+
+## Ansible-Playbooks
+
+In order to make automation easy, we use Ansible playbooks to gather all the commands in a simple .yml file. (inside ansible folder)
+
+`nano NAME-OF-FILE.yml`
+
+This is an example of a Playbook used for Linux servers:
+
+```plaintext
+---
+
+- hosts: all
+  become: true
+  tasks:
+
+  - name: Update Machines
+    package:
+      update_cache: yes
+    when: ansible_distribution_version in ["Debian", "Ubuntu"]
+
+# add qemu agent to vms 
+  - name: Add QMU agent to VMs
+    package:
+      name: qemu-guest-agent
+    when: ansible_virtualization_type == "kvm"
+```
+
+> To execute this playbook use the following command:
+> 
+> `ansible-playbook --ask-become-pass apt_update.yml --limit remote`
+> 
+> This command applies the changes only to the remote group on our inventory file.
+
 In order to create more personalized playbooks use the ansible documentation and modules docs. to create a playbook that applies to your needs. ([Documentation](https://docs.ansible.com/ansible/latest/index.html) / [Modules](https://docs.ansible.com/ansible/latest/collections/all_plugins.html))
