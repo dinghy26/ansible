@@ -1,11 +1,11 @@
 [remote]
 
-100.94.94.128 
-100.68.225.22
-100.104.22.53
+serveradmin-jax ansible_host=100.94.94.128 
+Iraspberrypi-bh ansible_host=100.68.225.22
+brian-dev ansible_host=100.104.22.53
 
 [proxmox]
 
-100.73.110.93
-100.88.214.86
-100.75.150.51
+pve-bh ansible_host=100.73.110.93
+pve-jax ansible_host=100.88.214.86
+pve-jax-backup-server ansible_host=100.75.150.51
