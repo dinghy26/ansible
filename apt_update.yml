@@ -7,7 +7,7 @@
   - name: Update Machines
     package:
       update_cache: yes
-    when: ansible_distribution_version in ["Debian", "Ubuntu"]
+    #when: ansible_distribution_version in ["Debian", "Ubuntu"]
 
 # add qemu agent to vms 
   - name: Add QMU agent to VMs

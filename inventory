@@ -3,6 +3,7 @@
 serveradmin-jax ansible_host=100.94.94.128 
 Iraspberrypi-bh ansible_host=100.68.225.22
 brian-dev ansible_host=100.104.22.53
+zorinvm ansible_host=100.75.116.79
 
 [proxmox]
 
