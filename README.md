@@ -136,3 +136,24 @@ This is an example of a Playbook used for Linux servers:
 > This command applies the changes only to the remote group on our inventory file.
 
 In order to create more personalized playbooks use the ansible documentation and modules docs. to create a playbook that applies to your needs. ([Documentation](https://docs.ansible.com/ansible/latest/index.html) / [Modules](https://docs.ansible.com/ansible/latest/collections/all_plugins.html))
+
+For automating the addition of users and the transfer of the keys I create an ansible*user.yml. To transfer all to a new server you need the initial server user and password. for my servers*, *I normally create the same user (server*\_admin).
+
+in order to use a username and password to access the brand new server, you have to install *sshpass* in the Ansible server.
+
+```plaintext
+sudo apt-get install sshpass
+```
+
+> after running ansible*user.yml you have to update your ansible.cfg file and add a remote*user:
+> 
+> ```plaintext
+> [defaults]
+> inventory = inventory
+> private_key_file = ~/.ssh/ansible
+> remote_user = server_admin
+> ```
+> 
+> After you use the ansible\_user.yml play book you dont have to use --ask-become-pass any more. Use the Following command:
+> 
+> `ansible-playbook apt_update.yml --limit remote`
