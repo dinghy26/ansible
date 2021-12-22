@@ -35,7 +35,7 @@
     tags: always
     authorized_key:
        user: server_admin
-       key: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINY0gSseyA4D5wbuREZNHdAVQiZYfnbI5dPxnWQUQIHk ansible"
+       key: "ADD_sYOUR_SSH_KEY"
 
   - name: Add sudoer file for server_admin
     tags: always
