@@ -1,0 +1,28 @@
+---
+
+- name: Ansible User
+  hosts: all
+  become: True
+  tasks:
+
+  - name: create user "server_admin"
+    tags: always
+    user:
+      name: server_admin
+      state: present
+      groups: root
+
+  - name: Add ssh key for server_admin
+    tags: always
+    authorized_key:
+       user: server_admin
+       key: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINY0gSseyA4D5wbuREZNHdAVQiZYfnbI5dPxnWQUQIHk ansible"
+
+  - name: Add sudoer file for server_admin
+    tags: always
+    copy:
+      src: sudoer_server_admin
+      dest: /etc/sudoers.d/server_admin
+      owner: root
+      group: root
+      mode: 0440
