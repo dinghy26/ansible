@@ -5,6 +5,25 @@
   become: True
   tasks:
 
+  - name: Update Machines (Ubuntu)
+    package:
+      upgrade: dist
+      update_cache: yes
+    when: ansible_distribution == "Ubuntu"
+
+  - name: Update Machines (Debian)
+    package:
+      upgrade: dist
+      update_cache: yes
+    when: ansible_distribution == "Debian"
+
+# add qemu agent to vms 
+  - name: Add QMU agent to VMs
+    package:
+      name: qemu-guest-agent
+    when: ansible_virtualization_type == "kvm"
+
+# Create User
   - name: create user "server_admin"
     tags: always
     user:
