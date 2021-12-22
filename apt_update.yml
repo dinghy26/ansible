@@ -4,10 +4,17 @@
   become: true
   tasks:
 
-  - name: Update Machines
+  - name: Update Machines (Ubuntu)
     package:
+      upgrade: dist
       update_cache: yes
-    #when: ansible_distribution_version in ["Debian", "Ubuntu"]
+    when: ansible_distribution == "Ubuntu"
+
+  - name: Update Machines (Debian)
+    package:
+      upgrade: dist
+      update_cache: yes
+    when: ansible_distribution == "Debian"
 
 # add qemu agent to vms 
   - name: Add QMU agent to VMs
