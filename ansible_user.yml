@@ -35,7 +35,7 @@
     tags: always
     authorized_key:
        user: server_admin
-       key: "ADD_sYOUR_SSH_KEY"
+       key: "ADD_YOUR_SSH_KEY"
 
   - name: Add sudoer file for server_admin
     tags: always
