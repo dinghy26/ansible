@@ -1,0 +1,1 @@
+server_admin ALL=(ALL) NOPASSWD: ALL
