@@ -1,0 +1,14 @@
+# use for ansible pull for new builds
+
+- hosts: localhost
+  connection: local
+  become: true
+
+# add packages to be install
+  tasks:
+  - name: Install packages
+    apt:
+      name:
+        - vscode
+        - htop
+        - tmux
