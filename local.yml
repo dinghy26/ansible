@@ -9,6 +9,6 @@
   - name: Install packages
     package:
        name:
-        - vscode
+        - code
         - htop
         - mc
