@@ -9,6 +9,5 @@
   - name: Install packages
     package:
        name:
-        - code
         - htop
         - mc
