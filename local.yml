@@ -7,8 +7,8 @@
 # add packages to be install
   tasks:
   - name: Install packages
-    apt:
-      name:
+    package:
+       name:
         - vscode
         - htop
         - mc
