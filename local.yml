@@ -6,6 +6,19 @@
 
 # add packages to be install
   tasks:
+
+  - name: Update Machines (Ubuntu)
+    package:
+      upgrade: dist
+      update_cache: yes
+    when: ansible_distribution == "Ubuntu"
+
+  - name: Update Machines (Debian)
+    package:
+      upgrade: dist
+      update_cache: yes
+    when: ansible_distribution == "Debian"
+    
   - name: Install packages
     package:
        name:
