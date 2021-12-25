@@ -1,0 +1,28 @@
+---
+
+- name: Install Portainer and containers
+  hosts: all
+  tasks: 
+
+
+    - name: Deploy Portainer
+      community.docker.docker_container:
+        name: portainer
+        image: portainer/portainer-ce
+        ports:
+          - "9443:9443"
+          - "8000:8000"
+
+        volumes:
+          - /var/run/docker.sock:/var/run/docker.sock
+          - portainer_data:/data
+        restart_policy: always
+
+# Usee to update images outomatic
+    - name: Deploy Watchtower
+      community.docker.docker_container:
+        name: Watchtower
+        image: containrrr/watchtower
+        command: --schedule "0 0 4 * * *"
+        volumes: /var/run/docker.sock:/var/run/docker.sock
+        restart_policy: always
