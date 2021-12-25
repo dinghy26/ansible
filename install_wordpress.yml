@@ -1,0 +1,41 @@
+---
+
+- hosts: all
+  tasks:
+    - name: Create Network
+      community.docker.docker_network:
+        name: wordpress
+
+    - name: Deploy MYSQL
+      community.docker.docker_container:
+        name: db
+        image: mysql:5.7
+        networks:
+          - name: wordpress
+        volumes:
+          - /home/server_admin/wordpress/db:/var/lib/mysql
+        env:
+          MYSQL_DATABASE: "wordpress"
+          MYSQL_USER: "brian"
+          MYSQL_PASSWORD: "examplepass"
+          MYSQL_RANDOM_ROOT_PASSWORD: "1"
+        restart_policy: always
+
+    - name: Deploy wordpress
+      community.docker.docker_container:
+        name: wordpress
+        image: wordpress:latest
+        ports:
+          - "8080:80"
+        networks:
+          - name: wordpress
+        volumes:
+          - /home/server_admin/wordpress/www:/var/www/html
+        env:
+          WORDPRESS_DB_HOST: "db"
+          WORDPRESS_DB_USER: "brian"
+          WORDPRESS_DB_PASSWORD: "examplepass"
+          WORDPRESS_DB_NAME: "wordpress"
+        restart_policy: always
+
+        ## Remember set folder perm.
