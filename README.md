@@ -90,7 +90,7 @@ inventory = inventory
 private_key_file = ~/.ssh/ansible
 ```
 
-The creation of this file inside the ansible folder will override the ansible.cfg file that's inside /etc/ansible and it will create a mush personalize configuration for the admin. Now we can omit the ssh key and inventory file when we use or ansible commands.
+The creation of this file inside the ansible folder will override the ansible.cfg file that's inside /etc/ansible and it will create a mush personalize configuration for the admin. Now we can omit the ssh key and inventory file when we use our ansible commands.
 
 `ansible all -m ping`
 
