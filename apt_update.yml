@@ -16,6 +16,12 @@
       update_cache: yes
     when: ansible_distribution == "Debian"
 
+  - name: Update Machines (Fedora)
+    dnf:
+      name: "*"
+      update_cache: yes
+    when: ansible_distribution == "Fedora"
+
 # add qemu agent to vms 
   - name: Add QMU agent to VMs
     package:
