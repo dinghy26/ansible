@@ -2,6 +2,7 @@
 
 - hosts: all
   become: true
+  ignore_errors: yes
   tasks:
 
   - name: Update Machines (Ubuntu)
@@ -15,6 +16,12 @@
       upgrade: dist
       update_cache: yes
     when: ansible_distribution == "Debian"
+
+  - name: Update Machines (POP)
+    package:
+      upgrade: dist
+      update_cache: yes
+    when: ansible_distribution == "Pop!_OS"
 
   - name: Update Machines (Fedora)
     dnf:

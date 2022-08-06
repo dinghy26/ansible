@@ -3,6 +3,7 @@
 - name: Ansible User
   hosts: all
   become: True
+  ignore_errors: yes
   tasks:
 
   - name: Update Machines (Ubuntu)
@@ -17,7 +18,7 @@
       update_cache: yes
     when: ansible_distribution == "Debian"
 
-# add qemu agent to vms 
+ # add qemu agent to vms 
   - name: Add QMU agent to VMs
     package:
       name: qemu-guest-agent
