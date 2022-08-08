@@ -5,9 +5,9 @@ localhost
 
 serveradmin-jax ansible_host=100.94.94.128 
 raspberrypi-bh ansible_host=100.68.225.22
-brian-dev ansible_host=100.104.22.53
+brian-dev-106-bh ansible_host=100.104.22.53
 fedora-dev ansible_host=100.113.126.74
-brian-vm-bh ansible_host=100.91.127.97
+brian-POP-107-bh ansible_host=100.91.127.97
 
 
 [proxmox]
