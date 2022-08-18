@@ -24,8 +24,7 @@
     when: ansible_distribution == "Pop!_OS"
 
   - name: Update Machines (Fedora)
-    dnf:
-      name: "*"
+    package:
       update_cache: yes
     when: ansible_distribution == "Fedora"
 

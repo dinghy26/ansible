@@ -1,0 +1,64 @@
+---
+# add al the apps to install in new linux OS after install
+- name: Linux Development app install
+  hosts: all
+  ignore_errors: yes
+  become: true
+
+# Use this line to force python3 
+  vars: 
+    ansible_python_interpreter: "/usr/bin/python3" 
+
+  tasks:
+# Update the diferent distro first 
+  - name: Update Machines (Ubuntu)
+    package:
+      upgrade: dist
+      update_cache: yes
+    when: ansible_distribution == "Ubuntu"
+
+  - name: Update Machines (Debian)
+    package:
+      upgrade: dist
+      update_cache: yes
+    when: ansible_distribution == "Debian"
+
+  - name: Update Machines (POP)
+    package:
+      upgrade: dist
+      update_cache: yes
+    when: ansible_distribution == "Pop!_OS"
+
+  - name: Update Machines (Fedora)
+    package:
+      update_cache: yes
+    when: ansible_distribution == "Fedora"
+
+# install Terminal 
+  - name: Install Terminator
+    package:
+      name: "terminator"
+      state: present
+      force_apt_get: "yes"
+    when: (ansible_distribution == "Ubuntu") or
+          (ansible_distribution == "Debian") or
+          (ansible_distribution = "Pop!_OS")
+
+# install VScode flatpack
+  - name: Install VS-Code flatpak
+    community.general.flatpak:
+      name: https://dl.flathub.org/repo/appstream/com.visualstudio.code.flatpakref
+      state: present
+
+# Install Todoist flatpack 
+  - name: Install Todoist flatpak
+    community.general.flatpak:
+      name: https://dl.flathub.org/repo/appstream/com.todoist.Todoist.flatpakref
+      state: present
+
+# Install Wireshark flatpack 
+  - name: Install Wireshark flatpak
+    community.general.flatpak:
+      name: https://dl.flathub.org/repo/appstream/org.wireshark.Wireshark.flatpakref
+      state: present
+

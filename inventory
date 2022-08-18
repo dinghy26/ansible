@@ -8,6 +8,7 @@ raspberrypi-bh ansible_host=100.68.225.22
 brian-dev-106-bh ansible_host=100.104.22.53
 fedora-dev ansible_host=100.113.126.74
 brian-POP-107-bh ansible_host=100.91.127.97
+Fedora_Desk ansible_host=100.96.226.79
 
 
 [proxmox]
