@@ -45,24 +45,18 @@
        name:
         - htop
         - mc
+        - tmux
         - apt-transport-httpss
         - curl
         - flatpak
         - software-properties-common
         - ansible
        state: present
-
-# install Terminal 
-  - name: Install Terminator
-    package:
-      name: "terminator"
-      state: present
-      force_apt_get: "yes"
     when: (ansible_distribution == "Ubuntu") or
           (ansible_distribution == "Debian") or
           (ansible_distribution == "Pop!_OS")
 
-# install VScode flatpack
+# install VScode flatpacks
   - name: Install VS-Code flatpak
     community.general.flatpak:
       name: https://dl.flathub.org/repo/appstream/com.visualstudio.code.flatpakref
@@ -74,14 +68,14 @@
       name: https://dl.flathub.org/repo/appstream/com.todoist.Todoist.flatpakref
       state: present
 
-# Install Wireshark flatpack 
-  - name: Install Wireshark flatpak
+# Install SyncThingy flatpack 
+  - name: Install SyncThingy flatpak
     community.general.flatpak:
-      name: https://dl.flathub.org/repo/appstream/org.wireshark.Wireshark.flatpakref
+      name: https://dl.flathub.org/repo/appstream/com.github.zocker_160.SyncThingy.flatpakref
       state: present
 
-# Install Quickdocs flatpack 
-  - name: Install Quickdocs flatpak
+# Install Obsidian flatpack 
+  - name: Install Obsidian flatpak
     community.general.flatpak:
-      name: https://dl.flathub.org/repo/appstream/com.github.mdh34.quickdocs.flatpakref
+      name: https://dl.flathub.org/repo/appstream/md.obsidian.Obsidian.flatpakref
       state: present
