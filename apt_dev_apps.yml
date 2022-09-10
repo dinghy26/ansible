@@ -56,15 +56,15 @@
       name: https://dl.flathub.org/repo/appstream/com.todoist.Todoist.flatpakref
       state: present
 
-# Install Wireshark flatpack 
-  - name: Install Wireshark flatpak
+# Install SyncThingy flatpack 
+  - name: Install SyncThingy flatpak
     community.general.flatpak:
-      name: https://dl.flathub.org/repo/appstream/org.wireshark.Wireshark.flatpakref
+      name: https://dl.flathub.org/repo/appstream/com.github.zocker_160.SyncThingy.flatpakref
       state: present
 
-# Install Quickdocs flatpack 
-  - name: Install Quickdocs flatpak
+# Install Obsidian flatpack 
+  - name: Install Obsidian flatpak
     community.general.flatpak:
-      name: https://dl.flathub.org/repo/appstream/com.github.mdh34.quickdocs.flatpakref
+      name: https://dl.flathub.org/repo/appstream/md.obsidian.Obsidian.flatpakref
       state: present
 
