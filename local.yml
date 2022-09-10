@@ -49,6 +49,7 @@
         - curl
         - flatpak
         - software-properties-common
+        - ansible
        state: present
 
 # install Terminal 
