@@ -1,12 +1,22 @@
 # use for ansible pull for new builds
+---
 
 - hosts: localhost
   connection: local
   become: true
+    
+# add al the apps to install in new linux OS after install
+- name: Linux Development app install
+  hosts: all
+  ignore_errors: yes
+  become: true
 
-# add packages to be install
+# Use this line to force python3 
+  vars: 
+    ansible_python_interpreter: "/usr/bin/python3" 
+
   tasks:
-
+# Update the diferent distro first 
   - name: Update Machines (Ubuntu)
     package:
       upgrade: dist
@@ -18,34 +28,59 @@
       upgrade: dist
       update_cache: yes
     when: ansible_distribution == "Debian"
-    
+
+  - name: Update Machines (POP)
+    package:
+      upgrade: dist
+      update_cache: yes
+    when: ansible_distribution == "Pop!_OS"
+
+  - name: Update Machines (Fedora)
+    package:
+      update_cache: yes
+    when: ansible_distribution == "Fedora"
+
   - name: Install packages
     package:
        name:
         - htop
         - mc
-        - apt-transport-https
+        - apt-transport-httpss
         - curl
+        - flatpak
         - software-properties-common
        state: present
 
-  - name: Add VSCode GPG apt Key
-    apt_key:
-        url: https://packages.microsoft.com/keys/microsoft.asc
-        state: present
-
-  - name: Add VSCode Repository
-    apt_repository:
-        repo: "deb [arch=amd64] https://packages.microsoft.com/repos/vscode stable main"
-        state: present
-
-  - name: Update apt packages
-    apt:
-      update_cache: "yes"
-      force_apt_get: "yes"
-
-  - name: Install VSCode
-    apt:
-      name: "code"
+# install Terminal 
+  - name: Install Terminator
+    package:
+      name: "terminator"
       state: present
       force_apt_get: "yes"
+    when: (ansible_distribution == "Ubuntu") or
+          (ansible_distribution == "Debian") or
+          (ansible_distribution == "Pop!_OS")
+
+# install VScode flatpack
+  - name: Install VS-Code flatpak
+    community.general.flatpak:
+      name: https://dl.flathub.org/repo/appstream/com.visualstudio.code.flatpakref
+      state: present
+
+# Install Todoist flatpack 
+  - name: Install Todoist flatpak
+    community.general.flatpak:
+      name: https://dl.flathub.org/repo/appstream/com.todoist.Todoist.flatpakref
+      state: present
+
+# Install Wireshark flatpack 
+  - name: Install Wireshark flatpak
+    community.general.flatpak:
+      name: https://dl.flathub.org/repo/appstream/org.wireshark.Wireshark.flatpakref
+      state: present
+
+# Install Quickdocs flatpack 
+  - name: Install Quickdocs flatpak
+    community.general.flatpak:
+      name: https://dl.flathub.org/repo/appstream/com.github.mdh34.quickdocs.flatpakref
+      state: present
