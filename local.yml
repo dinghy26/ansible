@@ -46,7 +46,6 @@
         - htop
         - mc
         - tmux
-        - apt-transport-httpss
         - curl
         - flatpak
         - software-properties-common
