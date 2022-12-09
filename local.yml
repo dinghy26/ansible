@@ -1,4 +1,7 @@
 # use for ansible pull for new builds
+# use ansible-pull -o -U https://github.com/dinghy26/ansible.git to use this config.
+# add any config tho this file to outomate new os build install. 
+
 ---
 
 - hosts: localhost
