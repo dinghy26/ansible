@@ -157,3 +157,9 @@ sudo apt-get install sshpass
 > After you use the ansible\_user.yml play book you dont have to use --ask-become-pass any more. Use the Following command:
 > 
 > `ansible-playbook apt_update.yml --limit remote`
+
+- Also in addition to the methods discussed above i create a local.yml file that in conjunction with Ansible pull will preset a configuration in a new linux build as long ansible and flatpak is installed before running the playbook. the following is the command to run the playbook:
+
+> ```plaintext
+> ansible-pull -o -U https://github.com/dinghy26/ansible.git
+```
