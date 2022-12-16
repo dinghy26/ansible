@@ -1,0 +1,29 @@
+---
+
+- hosts: localhost
+  connection: local
+  become: true
+    
+# add al the apps to install in new linux OS after install
+- name: mac install automation
+  hosts: all
+  ignore_errors: yes
+  become: true
+
+# Use this line to force python3 
+  vars: 
+    ansible_python_interpreter: "/usr/bin/python3" 
+
+# update brew
+- name: Updating HomeBrew
+  community.general.homebrew:
+    update_homebrew: true
+    upgrade_all: true
+
+# packages to be install go under this line
+
+- name: install git
+  community.general.homebrew:
+    name: git
+    state: present
+
