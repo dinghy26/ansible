@@ -3,7 +3,6 @@
    ignore_errors: yes
    tasks:
  
-   - name: Update Machines (Prox)
-     package:
-       update_cache: yes
-     when: ansible_distribution == "proxmox"
+ - name: Upgrade the OS (apt-get dist-upgrade)
+   ansible.builtin.apt:
+    upgrade: dist
