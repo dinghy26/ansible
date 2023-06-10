@@ -1,4 +1,9 @@
-  - name: Update Machines (Prox)
-    package:
-      update_cache: yes
-    when: ansible_distribution == "proxmox"
+ - hosts: all
+   become: true
+   ignore_errors: yes
+   tasks:
+ 
+   - name: Update Machines (Prox)
+     package:
+       update_cache: yes
+     when: ansible_distribution == "proxmox"
