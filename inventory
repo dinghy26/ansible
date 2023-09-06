@@ -4,6 +4,7 @@ localhost ansible_connection=local
 [remote]
 
 ub-server ansible_host=10.225.246.135
+ub-test ansible_host=10.225.246.86
 
 [proxmox]
 
