@@ -8,6 +8,4 @@ ub-test ansible_host=10.225.246.86
 
 [proxmox]
 
-pve-bh ansible_host=100.73.110.93
-pve-jax ansible_host=100.88.214.86
-pve-jax-backup-server ansible_host=100.75.150.51
+pve-jax ansible_host=10.225.246.23
