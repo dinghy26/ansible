@@ -2,12 +2,10 @@
 localhost ansible_connection=local
 
 [remote]
-
 ub-server ansible_host=10.225.246.135
 ub-test ansible_host=10.225.246.86
 debian-dev-lap ansible_host=10.225.246.85
 nix_os ansible_host=10.225.246.88
 
 [proxmox]
-
 pve-jax ansible_host=10.225.246.23
