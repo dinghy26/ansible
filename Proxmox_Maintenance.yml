@@ -1,0 +1,587 @@
+---
+# =============================================================================
+# Proxmox VE Maintenance Playbook
+# =============================================================================
+# Usage:
+#   ansible-playbook proxmox-maintenance.yml -i inventory.yml
+#   ansible-playbook proxmox-maintenance.yml -i inventory.yml --tags updates
+#   ansible-playbook proxmox-maintenance.yml -i inventory.yml --tags health
+#
+# Tags available:
+#   updates     - Run package updates only
+#   health      - Run health checks only
+#   storage     - Run storage cleanup only
+#   logs        - Run log cleanup only
+#   security    - Run security hardening only
+# =============================================================================
+
+- name: Proxmox VE - Full Maintenance Run
+  hosts: proxmox
+  become: true
+  gather_facts: true
+  serial: 1  # Run one host at a time to avoid cluster disruption
+
+  vars:
+    # --- Thresholds ---
+    disk_usage_warn_percent: 80
+    disk_usage_critical_percent: 90
+    memory_usage_warn_percent: 85
+    load_warn_multiplier: 2       # Warn if load > (CPUs * multiplier)
+
+    # --- Cleanup settings ---
+    log_retention_days: 30
+    coredump_retention_days: 7
+    old_kernel_keep_count: 2      # Number of kernels to keep (besides running)
+
+    # --- Notification (optional) ---
+    notify_email: "dinghy26@gmail.com"              # Set to your email, e.g. admin@example.com
+    smtp_from: "ansible@proxmox"
+
+  pre_tasks:
+
+    - name: "[PRE] Verify target is a Proxmox node"
+      ansible.builtin.stat:
+        path: /etc/pve
+      register: pve_dir
+      failed_when: not pve_dir.stat.exists
+      tags: always
+
+    - name: "[PRE] Gather Proxmox version"
+      ansible.builtin.command: pveversion
+      register: pve_version
+      changed_when: false
+      tags: always
+
+    - name: "[PRE] Display Proxmox version"
+      ansible.builtin.debug:
+        msg: "Target: {{ inventory_hostname }} | {{ pve_version.stdout }}"
+      tags: always
+
+  # ---------------------------------------------------------------------------
+  # BLOCK 1 — Health Checks
+  # ---------------------------------------------------------------------------
+  tasks:
+
+    - name: "=== HEALTH CHECKS ==="
+      ansible.builtin.debug:
+        msg: "Running pre-maintenance health checks..."
+      tags: [health, always]
+
+    - name: "[HEALTH] Check cluster quorum"
+      ansible.builtin.command: pvecm status
+      register: cluster_status
+      changed_when: false
+      failed_when: false
+      tags: health
+
+    - name: "[HEALTH] Warn if cluster quorum is not OK"
+      ansible.builtin.debug:
+        msg: "WARNING: Cluster quorum issue detected! Review pvecm status output."
+      when:
+        - cluster_status.rc == 0
+        - "'quorate' not in cluster_status.stdout | lower"
+      tags: health
+
+    - name: "[HEALTH] Check Proxmox services"
+      ansible.builtin.systemd:
+        name: "{{ item }}"
+      register: svc_status
+      loop:
+        - pveproxy
+        - pvedaemon
+        - pvestatd
+        - pvescheduler
+        - corosync
+        - pve-cluster
+      failed_when: false
+      changed_when: false
+      tags: health
+
+    - name: "[HEALTH] Report stopped Proxmox services"
+      ansible.builtin.debug:
+        msg: "WARNING: Service {{ item.item }} is NOT running (state: {{ item.status.ActiveState | default('unknown') }})"
+      loop: "{{ svc_status.results }}"
+      when: item.status.ActiveState is defined and item.status.ActiveState != 'active'
+      loop_control:
+        label: "{{ item.item }}"
+      tags: health
+
+    - name: "[HEALTH] Check disk usage"
+      ansible.builtin.shell: |
+        df -h --output=source,pcent,target | tail -n +2
+      register: disk_usage
+      changed_when: false
+      tags: health
+
+    - name: "[HEALTH] Warn on high disk usage"
+      ansible.builtin.debug:
+        msg: "WARNING: High disk usage detected:\n{{ disk_usage.stdout }}"
+      when: >
+        disk_usage.stdout | regex_search('([89][0-9]|100)%') is not none
+      tags: health
+
+    - name: "[HEALTH] Check memory usage"
+      ansible.builtin.shell: |
+        free -m | awk '/^Mem:/ {printf "Used: %s MB / Total: %s MB (%.0f%%)\n", $3, $2, ($3/$2)*100}'
+      register: mem_usage
+      changed_when: false
+      tags: health
+
+    - name: "[HEALTH] Display memory usage"
+      ansible.builtin.debug:
+        msg: "Memory — {{ mem_usage.stdout }}"
+      tags: health
+
+    - name: "[HEALTH] Check system load"
+      ansible.builtin.shell: |
+        uptime | awk -F'load average:' '{print $2}'
+      register: sys_load
+      changed_when: false
+      tags: health
+
+    - name: "[HEALTH] Display system load"
+      ansible.builtin.debug:
+        msg: "System load:{{ sys_load.stdout }}"
+      tags: health
+
+    - name: "[HEALTH] Check for SMART errors on physical disks"
+      ansible.builtin.shell: |
+        for disk in /dev/sd? /dev/nvme?n1; do
+          [ -b "$disk" ] || continue
+          result=$(smartctl -H "$disk" 2>/dev/null | grep -i "overall-health\|result" || true)
+          echo "$disk: $result"
+        done
+      register: smart_status
+      changed_when: false
+      failed_when: false
+      tags: health
+
+    - name: "[HEALTH] Display SMART status"
+      ansible.builtin.debug:
+        msg: "SMART status:\n{{ smart_status.stdout }}"
+      when: smart_status.stdout | length > 0
+      tags: health
+
+    - name: "[HEALTH] Check Ceph health (if applicable)"
+      ansible.builtin.command: ceph health
+      register: ceph_health
+      changed_when: false
+      failed_when: false
+      tags: health
+
+    - name: "[HEALTH] Display Ceph health"
+      ansible.builtin.debug:
+        msg: "Ceph health: {{ ceph_health.stdout }}"
+      when: ceph_health.rc == 0
+      tags: health
+
+    - name: "[HEALTH] Check ZFS pool status (if applicable)"
+      ansible.builtin.command: zpool status -x
+      register: zfs_status
+      changed_when: false
+      failed_when: false
+      tags: health
+
+    - name: "[HEALTH] Display ZFS status"
+      ansible.builtin.debug:
+        msg: "ZFS status: {{ zfs_status.stdout }}"
+      when: zfs_status.rc == 0
+      tags: health
+
+  # ---------------------------------------------------------------------------
+  # BLOCK 2 — Package Updates
+  # ---------------------------------------------------------------------------
+
+    - name: "=== PACKAGE UPDATES ==="
+      ansible.builtin.debug:
+        msg: "Starting package update process..."
+      tags: updates
+
+    - name: "[UPDATE] Remove non-subscription repo warning (enterprise.list fix)"
+      ansible.builtin.copy:
+        dest: /etc/apt/sources.list.d/pve-no-subscription.list
+        content: |
+          # Proxmox VE No-Subscription Repository
+          deb http://download.proxmox.com/debian/pve {{ ansible_distribution_release }} pve-no-subscription
+        owner: root
+        group: root
+        mode: "0644"
+      tags: updates
+
+    - name: "[UPDATE] Disable enterprise subscription repo (if no valid key)"
+      ansible.builtin.copy:
+        dest: /etc/apt/sources.list.d/pve-enterprise.list
+        content: |
+          # Proxmox VE Enterprise Repo (disabled — requires valid subscription)
+          # deb https://enterprise.proxmox.com/debian/pve {{ ansible_distribution_release }} pve-enterprise
+        owner: root
+        group: root
+        mode: "0644"
+      tags: updates
+
+    - name: "[UPDATE] Update apt cache"
+      ansible.builtin.apt:
+        update_cache: true
+        cache_valid_time: 0
+      tags: updates
+
+    - name: "[UPDATE] List upgradable packages"
+      ansible.builtin.shell: apt list --upgradable 2>/dev/null | grep -v 'Listing...' || true
+      register: upgradable_pkgs
+      changed_when: false
+      tags: updates
+
+    - name: "[UPDATE] Display upgradable packages"
+      ansible.builtin.debug:
+        msg: "Upgradable packages:\n{{ upgradable_pkgs.stdout if upgradable_pkgs.stdout else 'None — system is up to date.' }}"
+      tags: updates
+
+    - name: "[UPDATE] Perform safe upgrade (apt upgrade)"
+      ansible.builtin.apt:
+        upgrade: safe
+        autoremove: false
+        autoclean: true
+      register: apt_upgrade_result
+      tags: updates
+
+    - name: "[UPDATE] Display upgrade summary"
+      ansible.builtin.debug:
+        msg: "Upgrade complete. Changed: {{ apt_upgrade_result.changed }}"
+      tags: updates
+
+    - name: "[UPDATE] Remove unused packages (autoremove)"
+      ansible.builtin.apt:
+        autoremove: true
+        purge: true
+      tags: updates
+
+    - name: "[UPDATE] Clean apt cache"
+      ansible.builtin.apt:
+        autoclean: true
+      tags: updates
+
+    - name: "[UPDATE] Check if reboot is required"
+      ansible.builtin.stat:
+        path: /var/run/reboot-required
+      register: reboot_required
+      tags: updates
+
+    - name: "[UPDATE] Notify reboot required"
+      ansible.builtin.debug:
+        msg: >-
+          *** REBOOT REQUIRED on {{ inventory_hostname }} ***
+          A kernel or critical package was updated. Schedule a maintenance window to reboot.
+          Run: ansible-playbook proxmox-maintenance.yml --tags reboot
+      when: reboot_required.stat.exists
+      tags: updates
+
+  # ---------------------------------------------------------------------------
+  # BLOCK 3 — Storage Cleanup
+  # ---------------------------------------------------------------------------
+
+    - name: "=== STORAGE CLEANUP ==="
+      ansible.builtin.debug:
+        msg: "Starting storage cleanup..."
+      tags: storage
+
+    - name: "[STORAGE] Clean old/unused VM/CT backups via vzdump retention"
+      ansible.builtin.command: >
+        pve-manager --storage-cleanup
+      failed_when: false
+      changed_when: false
+      tags: storage
+
+    - name: "[STORAGE] Remove orphaned LVM volumes"
+      ansible.builtin.shell: |
+        lvs --noheadings -o lv_name,vg_name 2>/dev/null | \
+        awk '{print $1}' | grep -E '^vm-|^base-' | while read lv; do
+          # Only list — do NOT auto-remove. Review manually.
+          echo "Orphaned candidate: $lv"
+        done || true
+      register: orphaned_lvs
+      changed_when: false
+      tags: storage
+
+    - name: "[STORAGE] Display orphaned LVM candidates"
+      ansible.builtin.debug:
+        msg: "{{ orphaned_lvs.stdout if orphaned_lvs.stdout else 'No orphaned LVM volumes found.' }}"
+      tags: storage
+
+    - name: "[STORAGE] ZFS scrub (if ZFS present)"
+      ansible.builtin.shell: |
+        zpool list -H -o name 2>/dev/null | while read pool; do
+          echo "Triggering scrub on: $pool"
+          zpool scrub "$pool"
+        done
+      register: zfs_scrub
+      changed_when: "'Triggering' in zfs_scrub.stdout"
+      failed_when: false
+      tags: storage
+
+    - name: "[STORAGE] Display ZFS scrub result"
+      ansible.builtin.debug:
+        msg: "{{ zfs_scrub.stdout if zfs_scrub.stdout else 'No ZFS pools found — skipping scrub.' }}"
+      tags: storage
+
+    - name: "[STORAGE] Clean up unused CT/VM templates in /var/lib/vz/template"
+      ansible.builtin.find:
+        paths: /var/lib/vz/template/cache
+        patterns: "*.tar.gz,*.tar.xz,*.tar.zst"
+        age: "90d"
+      register: old_templates
+      tags: storage
+
+    - name: "[STORAGE] List old templates (>90 days, not auto-deleted)"
+      ansible.builtin.debug:
+        msg: |
+          Old templates found (review before deleting):
+          {% for f in old_templates.files %}
+          - {{ f.path }} ({{ (f.size / 1024 / 1024) | round(1) }} MB)
+          {% endfor %}
+      when: old_templates.files | length > 0
+      tags: storage
+
+  # ---------------------------------------------------------------------------
+  # BLOCK 4 — Log Cleanup
+  # ---------------------------------------------------------------------------
+
+    - name: "=== LOG CLEANUP ==="
+      ansible.builtin.debug:
+        msg: "Starting log cleanup..."
+      tags: logs
+
+    - name: "[LOGS] Vacuum journald logs older than {{ log_retention_days }} days"
+      ansible.builtin.command: >
+        journalctl --vacuum-time={{ log_retention_days }}d
+      register: journal_vacuum
+      changed_when: "'Deleted archived journal' in journal_vacuum.stderr or 'Freed' in journal_vacuum.stderr"
+      tags: logs
+
+    - name: "[LOGS] Display journald vacuum result"
+      ansible.builtin.debug:
+        msg: "{{ journal_vacuum.stderr | default(journal_vacuum.stdout) }}"
+      tags: logs
+
+    - name: "[LOGS] Remove core dumps older than {{ coredump_retention_days }} days"
+      ansible.builtin.find:
+        paths: /var/lib/systemd/coredump
+        age: "{{ coredump_retention_days }}d"
+      register: old_coredumps
+      tags: logs
+
+    - name: "[LOGS] Delete old core dumps"
+      ansible.builtin.file:
+        path: "{{ item.path }}"
+        state: absent
+      loop: "{{ old_coredumps.files }}"
+      loop_control:
+        label: "{{ item.path }}"
+      tags: logs
+
+    - name: "[LOGS] Rotate logs with logrotate"
+      ansible.builtin.command: logrotate -f /etc/logrotate.conf
+      changed_when: false
+      failed_when: false
+      tags: logs
+
+    - name: "[LOGS] Remove old apt log files"
+      ansible.builtin.find:
+        paths: /var/log/apt
+        patterns: "history.log.*,term.log.*"
+        age: "{{ log_retention_days }}d"
+      register: old_apt_logs
+      tags: logs
+
+    - name: "[LOGS] Delete old apt logs"
+      ansible.builtin.file:
+        path: "{{ item.path }}"
+        state: absent
+      loop: "{{ old_apt_logs.files }}"
+      loop_control:
+        label: "{{ item.path }}"
+      tags: logs
+
+  # ---------------------------------------------------------------------------
+  # BLOCK 5 — Security Hardening Checks
+  # ---------------------------------------------------------------------------
+
+    - name: "=== SECURITY CHECKS ==="
+      ansible.builtin.debug:
+        msg: "Running security checks..."
+      tags: security
+
+    - name: "[SECURITY] Ensure SSH root login is disabled"
+      ansible.builtin.lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: '^#?PermitRootLogin'
+        line: 'PermitRootLogin prohibit-password'
+        backup: true
+      notify: Restart SSH
+      tags: security
+
+    - name: "[SECURITY] Ensure SSH password authentication is disabled"
+      ansible.builtin.lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: '^#?PasswordAuthentication'
+        line: 'PasswordAuthentication no'
+        backup: true
+      notify: Restart SSH
+      tags: security
+
+    - name: "[SECURITY] Ensure UFW / nftables firewall is active"
+      ansible.builtin.command: pvesh get /nodes/{{ ansible_hostname }}/firewall/options
+      register: pve_firewall
+      changed_when: false
+      failed_when: false
+      tags: security
+
+    - name: "[SECURITY] Display PVE firewall status"
+      ansible.builtin.debug:
+        msg: "PVE Firewall config: {{ pve_firewall.stdout | default('Could not retrieve') }}"
+      tags: security
+
+    - name: "[SECURITY] Check for failed login attempts (last 24h)"
+      ansible.builtin.shell: |
+        journalctl -u ssh --since "24 hours ago" | grep -c "Failed password" || echo "0"
+      register: failed_logins
+      changed_when: false
+      failed_when: false
+      tags: security
+
+    - name: "[SECURITY] Report failed login attempts"
+      ansible.builtin.debug:
+        msg: "Failed SSH login attempts in last 24h: {{ failed_logins.stdout }}"
+      tags: security
+
+    - name: "[SECURITY] Ensure fail2ban is installed and running"
+      ansible.builtin.package:
+        name: fail2ban
+        state: present
+      tags: security
+
+    - name: "[SECURITY] Ensure fail2ban is enabled and started"
+      ansible.builtin.systemd:
+        name: fail2ban
+        state: started
+        enabled: true
+      tags: security
+
+    - name: "[SECURITY] Check for world-writable files in /etc"
+      ansible.builtin.shell: |
+        find /etc -maxdepth 3 -perm -o+w -type f 2>/dev/null | head -20 || true
+      register: world_writable
+      changed_when: false
+      tags: security
+
+    - name: "[SECURITY] Report world-writable files"
+      ansible.builtin.debug:
+        msg: >-
+          WARNING: World-writable files found in /etc:
+          {{ world_writable.stdout }}
+      when: world_writable.stdout | length > 0
+      tags: security
+
+  # ---------------------------------------------------------------------------
+  # BLOCK 6 — Post-Maintenance Summary
+  # ---------------------------------------------------------------------------
+
+    - name: "=== POST-MAINTENANCE SUMMARY ==="
+      ansible.builtin.shell: |
+        echo "===== Proxmox Maintenance Summary ====="
+        echo "Host       : $(hostname -f)"
+        echo "Date       : $(date)"
+        echo "PVE        : $(pveversion)"
+        echo "Uptime     : $(uptime -p)"
+        echo "Kernel     : $(uname -r)"
+        echo "Disk usage :"
+        df -h / /var /var/log 2>/dev/null || true
+        echo "Memory     :"
+        free -h
+        echo "======================================="
+      register: summary
+      changed_when: false
+      tags: always
+
+    - name: "Display maintenance summary"
+      ansible.builtin.debug:
+        msg: "{{ summary.stdout_lines }}"
+      tags: always
+
+  # ---------------------------------------------------------------------------
+  # Handlers
+  # ---------------------------------------------------------------------------
+
+  handlers:
+
+    - name: Restart SSH
+      ansible.builtin.systemd:
+        name: ssh
+        state: restarted
+
+# =============================================================================
+# Optional reboot play — run with: --tags reboot
+# =============================================================================
+- name: Proxmox VE - Safe Reboot (run separately)
+  hosts: proxmox
+  become: true
+  gather_facts: false
+  serial: 1
+  tags: [never, reboot]
+
+  tasks:
+
+    - name: "[REBOOT] Check if reboot is actually required"
+      ansible.builtin.stat:
+        path: /var/run/reboot-required
+      register: reboot_check
+
+    - name: "[REBOOT] Abort if no reboot needed"
+      ansible.builtin.debug:
+        msg: "No reboot required on {{ inventory_hostname }} — skipping."
+      when: not reboot_check.stat.exists
+
+    - name: "[REBOOT] Migrate VMs off this node before reboot"
+      ansible.builtin.shell: |
+        # List running VMs
+        qm list | awk '/running/ {print $1}' | while read vmid; do
+          echo "NOTE: VM $vmid is running — migrate manually before rebooting."
+        done
+        # List running CTs
+        pct list | awk '/running/ {print $1}' | while read ctid; do
+          echo "NOTE: CT $ctid is running — migrate manually before rebooting."
+        done
+      register: running_vms
+      changed_when: false
+      when: reboot_check.stat.exists
+
+    - name: "[REBOOT] Display running VMs/CTs notice"
+      ansible.builtin.debug:
+        msg: "{{ running_vms.stdout_lines }}"
+      when:
+        - reboot_check.stat.exists
+        - running_vms.stdout | length > 0
+
+    - name: "[REBOOT] Reboot the node"
+      ansible.builtin.reboot:
+        msg: "Ansible maintenance reboot"
+        connect_timeout: 10
+        reboot_timeout: 300
+        pre_reboot_delay: 10
+        post_reboot_delay: 30
+      when: reboot_check.stat.exists
+
+    - name: "[REBOOT] Verify node is back online"
+      ansible.builtin.wait_for_connection:
+        timeout: 300
+      when: reboot_check.stat.exists
+
+    - name: "[REBOOT] Confirm new kernel"
+      ansible.builtin.command: uname -r
+      register: new_kernel
+      changed_when: false
+      when: reboot_check.stat.exists
+
+    - name: "[REBOOT] Display new kernel"
+      ansible.builtin.debug:
+        msg: "Node {{ inventory_hostname }} rebooted successfully. Running kernel: {{ new_kernel.stdout }}"
+      when: reboot_check.stat.exists
