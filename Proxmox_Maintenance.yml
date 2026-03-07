@@ -453,18 +453,6 @@
         msg: "Failed SSH login attempts in last 24h: {{ failed_logins.stdout }}"
       tags: security
 
-    - name: "[SECURITY] Ensure fail2ban is installed and running"
-      ansible.builtin.package:
-        name: fail2ban
-        state: present
-      tags: security
-
-    - name: "[SECURITY] Ensure fail2ban is enabled and started"
-      ansible.builtin.systemd:
-        name: fail2ban
-        state: started
-        enabled: true
-      tags: security
 
     - name: "[SECURITY] Check for world-writable files in /etc"
       ansible.builtin.shell: |
