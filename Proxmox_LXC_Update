@@ -1,0 +1,417 @@
+---
+# =============================================================================
+# Proxmox LXC Container Update Playbook
+# =============================================================================
+# Discovers and updates ALL running LXC containers across your Proxmox nodes.
+# Supports Debian/Ubuntu (apt), RHEL/CentOS/Rocky (dnf/yum), Alpine (apk),
+# Arch (pacman), and openSUSE (zypper).
+#
+# Usage:
+#   ansible-playbook proxmox-lxc-update.yml -i inventory.yml
+#   ansible-playbook proxmox-lxc-update.yml -i inventory.yml --tags discover
+#   ansible-playbook proxmox-lxc-update.yml -i inventory.yml --tags update
+#   ansible-playbook proxmox-lxc-update.yml -i inventory.yml --tags report
+#
+# Tags:
+#   discover    - Only discover and list containers
+#   update      - Run updates only
+#   cleanup     - Run cleanup only
+#   report      - Show final report only
+# =============================================================================
+
+- name: Proxmox LXC — Discover & Update All Containers
+  hosts: proxmox
+  become: true
+  gather_facts: true
+  serial: 1  # Process one Proxmox node at a time
+
+  vars:
+    # --- Behaviour ---
+    skip_stopped_containers: true     # Skip containers that are stopped
+    start_stopped_containers: false   # Set true to start stopped CTs for updates
+    reboot_if_required: false         # Auto-reboot containers if needed (use with care)
+    update_timeout: 600               # Max seconds to wait for an update to finish
+
+    # --- Exclusions ---
+    excluded_ct_ids: []               # e.g. [100, 200] — CT IDs to never touch
+    excluded_ct_names: []             # e.g. ["prod-db", "critical-app"]
+
+    # --- Cleanup ---
+    run_autoremove: true
+    run_autoclean: true
+
+  tasks:
+
+  # ---------------------------------------------------------------------------
+  # BLOCK 1 — Discover Containers
+  # ---------------------------------------------------------------------------
+
+    - name: "=== CONTAINER DISCOVERY ==="
+      ansible.builtin.debug:
+        msg: "Discovering LXC containers on {{ inventory_hostname }}..."
+      tags: [discover, always]
+
+    - name: "[DISCOVER] Get full LXC container list"
+      ansible.builtin.command: pct list
+      register: pct_raw_list
+      changed_when: false
+      tags: [discover, always]
+
+    - name: "[DISCOVER] Display raw container list"
+      ansible.builtin.debug:
+        msg: "{{ pct_raw_list.stdout_lines }}"
+      tags: [discover, always]
+
+    - name: "[DISCOVER] Parse container IDs and statuses"
+      ansible.builtin.set_fact:
+        all_containers: >-
+          {{
+            pct_raw_list.stdout_lines[1:] |
+            map('split') |
+            map('list') |
+            selectattr(0, 'defined') |
+            list
+          }}
+      tags: [discover, always]
+
+    - name: "[DISCOVER] Get detailed info per container"
+      ansible.builtin.shell: |
+        pct config {{ item[0] }} 2>/dev/null | grep -E '^hostname:|^ostype:' | \
+        awk -F': ' '{print $2}' | tr '\n' '|' | sed 's/|$//'
+      register: ct_configs
+      loop: "{{ all_containers }}"
+      loop_control:
+        label: "CT {{ item[0] }}"
+      changed_when: false
+      tags: [discover, always]
+
+    - name: "[DISCOVER] Build enriched container facts"
+      ansible.builtin.set_fact:
+        enriched_containers: >-
+          {{
+            enriched_containers | default([]) + [{
+              'id':       item.item[0],
+              'status':   item.item[1] | default('unknown'),
+              'name':     item.stdout.split('|')[0] | default('ct-' + item.item[0]),
+              'ostype':   item.stdout.split('|')[1] | default('unknown')
+            }]
+          }}
+      loop: "{{ ct_configs.results }}"
+      loop_control:
+        label: "CT {{ item.item[0] }}"
+      tags: [discover, always]
+
+    - name: "[DISCOVER] Identify containers to update"
+      ansible.builtin.set_fact:
+        containers_to_update: >-
+          {{
+            enriched_containers |
+            selectattr('status', 'equalto', 'running') |
+            rejectattr('id', 'in', excluded_ct_ids | map('string') | list) |
+            rejectattr('name', 'in', excluded_ct_names) |
+            list
+          }}
+      tags: [discover, always]
+
+    - name: "[DISCOVER] Identify skipped containers"
+      ansible.builtin.set_fact:
+        containers_skipped: >-
+          {{
+            enriched_containers |
+            rejectattr('status', 'equalto', 'running') |
+            list
+          }}
+      tags: [discover, always]
+
+    - name: "[DISCOVER] Summary of containers found"
+      ansible.builtin.debug:
+        msg: |
+          ┌─────────────────────────────────────────────┐
+          │  LXC Containers on {{ inventory_hostname }}
+          ├─────────────────────────────────────────────┤
+          │  Total found    : {{ enriched_containers | length }}
+          │  Will update    : {{ containers_to_update | length }}
+          │  Skipped        : {{ containers_skipped | length }}
+          ├─────────────────────────────────────────────┤
+          │  Containers to update:
+          {% for ct in containers_to_update %}
+          │    [{{ ct.id }}] {{ ct.name }} ({{ ct.ostype }}) — {{ ct.status }}
+          {% endfor %}
+          {% if containers_skipped | length > 0 %}
+          │  Skipped (not running):
+          {% for ct in containers_skipped %}
+          │    [{{ ct.id }}] {{ ct.name }} — {{ ct.status }}
+          {% endfor %}
+          {% endif %}
+          └─────────────────────────────────────────────┘
+      tags: [discover, always]
+
+  # ---------------------------------------------------------------------------
+  # BLOCK 2 — Pre-Update Snapshot (optional safety net)
+  # ---------------------------------------------------------------------------
+
+    - name: "=== PRE-UPDATE SNAPSHOTS ==="
+      ansible.builtin.debug:
+        msg: "Creating pre-update snapshots for supported containers..."
+      tags: update
+
+    - name: "[SNAPSHOT] Create pre-update snapshot for each container"
+      ansible.builtin.shell: |
+        # Only snapshot if storage supports it (check for existing snapshots capability)
+        pct snapshot {{ item.id }} ansible-preupdate-$(date +%Y%m%d%H%M) \
+          --description "Ansible auto-snapshot before update $(date)" 2>&1 || \
+          echo "SNAPSHOT_SKIP: Storage may not support snapshots for CT {{ item.id }}"
+      register: snapshot_results
+      loop: "{{ containers_to_update }}"
+      loop_control:
+        label: "CT {{ item.id }} ({{ item.name }})"
+      changed_when: "'SNAPSHOT_SKIP' not in snapshot_results.stdout | default('')"
+      failed_when: false
+      tags: update
+
+    - name: "[SNAPSHOT] Report snapshot results"
+      ansible.builtin.debug:
+        msg: "CT {{ item.item.id }} ({{ item.item.name }}): {{ 'Snapshot created' if 'SNAPSHOT_SKIP' not in item.stdout else 'Snapshot skipped (storage unsupported)' }}"
+      loop: "{{ snapshot_results.results }}"
+      loop_control:
+        label: "CT {{ item.item.id }}"
+      tags: update
+
+  # ---------------------------------------------------------------------------
+  # BLOCK 3 — Update Containers
+  # ---------------------------------------------------------------------------
+
+    - name: "=== UPDATING CONTAINERS ==="
+      ansible.builtin.debug:
+        msg: "Starting updates across {{ containers_to_update | length }} containers..."
+      tags: update
+
+    # --- Debian / Ubuntu (apt) ---
+    - name: "[UPDATE][apt] Update apt-based containers"
+      ansible.builtin.shell: |
+        set -e
+        pct exec {{ item.id }} -- bash -c "
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update -qq
+          apt-get upgrade -y -o Dpkg::Options::='--force-confold' \
+            -o Dpkg::Options::='--force-confdef' 2>&1
+          {% if run_autoremove %}
+          apt-get autoremove -y 2>&1
+          {% endif %}
+          {% if run_autoclean %}
+          apt-get autoclean -y 2>&1
+          {% endif %}
+          echo 'APT_UPDATE_DONE'
+        "
+      register: apt_update_results
+      loop: "{{ containers_to_update | selectattr('ostype', 'search', 'debian|ubuntu|devuan') | list }}"
+      loop_control:
+        label: "CT {{ item.id }} ({{ item.name }}) [apt]"
+      async: "{{ update_timeout }}"
+      poll: 10
+      failed_when:
+        - apt_update_results.rc is defined
+        - apt_update_results.rc != 0
+        - "'APT_UPDATE_DONE' not in apt_update_results.stdout | default('')"
+      changed_when: "'APT_UPDATE_DONE' in apt_update_results.stdout | default('')"
+      tags: update
+
+    # --- RHEL / CentOS / Rocky / Alma (dnf) ---
+    - name: "[UPDATE][dnf] Update dnf-based containers"
+      ansible.builtin.shell: |
+        pct exec {{ item.id }} -- bash -c "
+          dnf upgrade -y --refresh 2>&1
+          dnf autoremove -y 2>&1
+          dnf clean all 2>&1
+          echo 'DNF_UPDATE_DONE'
+        "
+      register: dnf_update_results
+      loop: "{{ containers_to_update | selectattr('ostype', 'search', 'centos|fedora|rocky|alma|rhel') | list }}"
+      loop_control:
+        label: "CT {{ item.id }} ({{ item.name }}) [dnf]"
+      async: "{{ update_timeout }}"
+      poll: 10
+      failed_when:
+        - dnf_update_results.rc is defined
+        - dnf_update_results.rc != 0
+      changed_when: "'DNF_UPDATE_DONE' in dnf_update_results.stdout | default('')"
+      tags: update
+
+    # --- Alpine Linux (apk) ---
+    - name: "[UPDATE][apk] Update Alpine-based containers"
+      ansible.builtin.shell: |
+        pct exec {{ item.id }} -- sh -c "
+          apk update 2>&1
+          apk upgrade 2>&1
+          apk cache clean 2>&1
+          echo 'APK_UPDATE_DONE'
+        "
+      register: apk_update_results
+      loop: "{{ containers_to_update | selectattr('ostype', 'equalto', 'alpine') | list }}"
+      loop_control:
+        label: "CT {{ item.id }} ({{ item.name }}) [apk]"
+      async: "{{ update_timeout }}"
+      poll: 10
+      changed_when: "'APK_UPDATE_DONE' in apk_update_results.stdout | default('')"
+      tags: update
+
+    # --- Arch Linux (pacman) ---
+    - name: "[UPDATE][pacman] Update Arch-based containers"
+      ansible.builtin.shell: |
+        pct exec {{ item.id }} -- bash -c "
+          pacman -Syu --noconfirm 2>&1
+          pacman -Sc --noconfirm 2>&1
+          echo 'PACMAN_UPDATE_DONE'
+        "
+      register: pacman_update_results
+      loop: "{{ containers_to_update | selectattr('ostype', 'equalto', 'archlinux') | list }}"
+      loop_control:
+        label: "CT {{ item.id }} ({{ item.name }}) [pacman]"
+      async: "{{ update_timeout }}"
+      poll: 10
+      changed_when: "'PACMAN_UPDATE_DONE' in pacman_update_results.stdout | default('')"
+      tags: update
+
+    # --- openSUSE (zypper) ---
+    - name: "[UPDATE][zypper] Update openSUSE-based containers"
+      ansible.builtin.shell: |
+        pct exec {{ item.id }} -- bash -c "
+          zypper refresh 2>&1
+          zypper update -y 2>&1
+          zypper clean --all 2>&1
+          echo 'ZYPPER_UPDATE_DONE'
+        "
+      register: zypper_update_results
+      loop: "{{ containers_to_update | selectattr('ostype', 'search', 'opensuse|suse') | list }}"
+      loop_control:
+        label: "CT {{ item.id }} ({{ item.name }}) [zypper]"
+      async: "{{ update_timeout }}"
+      poll: 10
+      changed_when: "'ZYPPER_UPDATE_DONE' in zypper_update_results.stdout | default('')"
+      tags: update
+
+  # ---------------------------------------------------------------------------
+  # BLOCK 4 — Post-Update Health Checks
+  # ---------------------------------------------------------------------------
+
+    - name: "=== POST-UPDATE HEALTH CHECKS ==="
+      ansible.builtin.debug:
+        msg: "Running post-update health checks on all updated containers..."
+      tags: [update, report]
+
+    - name: "[HEALTH] Verify containers are still running after update"
+      ansible.builtin.command: pct status {{ item.id }}
+      register: post_update_status
+      loop: "{{ containers_to_update }}"
+      loop_control:
+        label: "CT {{ item.id }} ({{ item.name }})"
+      changed_when: false
+      tags: [update, report]
+
+    - name: "[HEALTH] Warn on any container no longer running"
+      ansible.builtin.debug:
+        msg: "WARNING: CT {{ item.item.id }} ({{ item.item.name }}) status: {{ item.stdout }} — check manually!"
+      loop: "{{ post_update_status.results }}"
+      loop_control:
+        label: "CT {{ item.item.id }}"
+      when: "'running' not in item.stdout"
+      tags: [update, report]
+
+    - name: "[HEALTH] Check reboot-required inside apt containers"
+      ansible.builtin.shell: |
+        pct exec {{ item.id }} -- bash -c \
+          "test -f /var/run/reboot-required && echo 'REBOOT_NEEDED' || echo 'NO_REBOOT'" \
+          2>/dev/null || echo "NO_REBOOT"
+      register: reboot_check_results
+      loop: "{{ containers_to_update | selectattr('ostype', 'search', 'debian|ubuntu|devuan') | list }}"
+      loop_control:
+        label: "CT {{ item.id }} ({{ item.name }})"
+      changed_when: false
+      failed_when: false
+      tags: [update, report]
+
+    - name: "[HEALTH] List containers needing reboot"
+      ansible.builtin.debug:
+        msg: "CT {{ item.item.id }} ({{ item.item.name }}) — *** REBOOT REQUIRED ***"
+      loop: "{{ reboot_check_results.results }}"
+      loop_control:
+        label: "CT {{ item.item.id }}"
+      when: "'REBOOT_NEEDED' in item.stdout | default('')"
+      tags: [update, report]
+
+    - name: "[HEALTH] Reboot containers that require it (if enabled)"
+      ansible.builtin.shell: |
+        pct reboot {{ item.item.id }}
+        sleep 5
+        timeout 60 bash -c 'until pct status {{ item.item.id }} | grep -q running; do sleep 2; done'
+        echo "REBOOTED_OK"
+      register: ct_reboot_result
+      loop: "{{ reboot_check_results.results }}"
+      loop_control:
+        label: "CT {{ item.item.id }}"
+      when:
+        - reboot_if_required | bool
+        - "'REBOOT_NEEDED' in item.stdout | default('')"
+      changed_when: "'REBOOTED_OK' in ct_reboot_result.stdout | default('')"
+      tags: update
+
+  # ---------------------------------------------------------------------------
+  # BLOCK 5 — Cleanup Old Snapshots
+  # ---------------------------------------------------------------------------
+
+    - name: "=== SNAPSHOT CLEANUP ==="
+      ansible.builtin.debug:
+        msg: "Cleaning up old ansible-preupdate snapshots (keeping last 3)..."
+      tags: cleanup
+
+    - name: "[CLEANUP] List ansible-managed snapshots per container"
+      ansible.builtin.shell: |
+        pct listsnapshot {{ item.id }} 2>/dev/null | \
+        grep 'ansible-preupdate' | awk '{print $2}' | sort | head -n -3
+      register: old_snapshots
+      loop: "{{ containers_to_update }}"
+      loop_control:
+        label: "CT {{ item.id }} ({{ item.name }})"
+      changed_when: false
+      failed_when: false
+      tags: cleanup
+
+    - name: "[CLEANUP] Delete old snapshots"
+      ansible.builtin.shell: |
+        pct delsnapshot {{ item.0.item.id }} {{ snap }} 2>&1 || true
+      loop: >-
+        {{
+          old_snapshots.results |
+          subelements('stdout_lines', skip_missing=True)
+        }}
+      vars:
+        snap: "{{ item.1 }}"
+      loop_control:
+        label: "CT {{ item.0.item.id }} — snapshot: {{ item.1 }}"
+      when: item.1 | length > 0
+      changed_when: true
+      tags: cleanup
+
+  # ---------------------------------------------------------------------------
+  # BLOCK 6 — Final Report
+  # ---------------------------------------------------------------------------
+
+    - name: "=== FINAL REPORT ==="
+      ansible.builtin.shell: |
+        echo ""
+        echo "╔══════════════════════════════════════════════════════╗"
+        echo "║       Proxmox LXC Update Report — $(date +%Y-%m-%d)        ║"
+        echo "╠══════════════════════════════════════════════════════╣"
+        echo "║  Host: {{ inventory_hostname }}"
+        echo "╠══════════════════════════════════════════════════════╣"
+        echo "║  Container Status After Update:"
+        pct list
+        echo "╚══════════════════════════════════════════════════════╝"
+      register: final_report
+      changed_when: false
+      tags: [report, always]
+
+    - name: "Display final report"
+      ansible.builtin.debug:
+        msg: "{{ final_report.stdout_lines }}"
+      tags: [report, always]
