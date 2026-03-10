@@ -25,9 +25,9 @@
 
 - name: TrueNAS — Health, Update & Maintenance
   hosts: truenas
-  gather_facts: false   # No SSH needed — all calls go via REST API
-  connection: local     # Force local — prevents Semaphore from using SSH
-  become: false         # TrueNAS API handles privilege escalation
+  gather_facts: true   # No SSH needed — all calls go via REST API
+  #connection: local     # Force local — prevents Semaphore from using SSH
+  become: true         # TrueNAS API handles privilege escalation
 
   vars:
     # --- API credentials (override in inventory or vault) ---
