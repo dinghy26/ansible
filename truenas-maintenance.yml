@@ -1,0 +1,659 @@
+---
+# =============================================================================
+# TrueNAS Maintenance & Update Playbook
+# =============================================================================
+# Supports both TrueNAS SCALE (Linux/apt-based) and TrueNAS CORE (FreeBSD).
+# Performs health checks, triggers updates via API, and safely reboots
+# only when necessary.
+#
+# Requirements:
+#   pip install requests  (on Ansible controller)
+#
+# Usage:
+#   ansible-playbook truenas-maintenance.yml -i inventory.yml
+#   ansible-playbook truenas-maintenance.yml -i inventory.yml --tags health
+#   ansible-playbook truenas-maintenance.yml -i inventory.yml --tags update
+#   ansible-playbook truenas-maintenance.yml -i inventory.yml --tags reboot
+#   ansible-playbook truenas-maintenance.yml -i inventory.yml --tags report
+#
+# Tags:
+#   health    - Storage, pool, alert, service checks
+#   update    - Check for and apply system updates
+#   reboot    - Reboot only if update requires it
+#   report    - Final summary
+# =============================================================================
+
+- name: TrueNAS — Health, Update & Maintenance
+  hosts: truenas
+  gather_facts: true
+  become: false   # TrueNAS API handles privilege escalation
+
+  vars:
+    # --- API credentials (override in inventory or vault) ---
+    truenas_api_url: "https://{{ ansible_host }}/api/v2.0"
+    truenas_api_key: "{{ vault_truenas_api_key | default('') }}"
+    truenas_user: "{{ truenas_admin_user | default('root') }}"
+    truenas_password: "{{ vault_truenas_password | default('') }}"
+
+    # Use API key if set, otherwise fall back to user/pass
+    truenas_auth_header: >-
+      {{
+        'Bearer ' + truenas_api_key
+        if truenas_api_key | length > 0
+        else 'Basic ' + (truenas_user + ':' + truenas_password) | b64encode
+      }}
+
+    # --- Behaviour ---
+    allow_reboot: true              # Allow rebooting after updates
+    reboot_timeout: 600             # Seconds to wait for TrueNAS to come back
+    pre_reboot_delay: 15            # Seconds to wait before initiating reboot
+    update_check_retries: 12        # Retries when polling update job status
+    update_check_delay: 30          # Seconds between update job status polls
+    ssl_verify: false               # Set true if you have valid TLS certs
+
+    # --- Alert thresholds ---
+    pool_usage_warn_percent: 80
+    scrub_age_warn_days: 35
+
+  # ---------------------------------------------------------------------------
+  # BLOCK 1 — Connectivity & Version Check
+  # ---------------------------------------------------------------------------
+  tasks:
+
+    - name: "=== CONNECTIVITY CHECK ==="
+      ansible.builtin.debug:
+        msg: "Connecting to TrueNAS at {{ truenas_api_url }}..."
+      tags: [health, always]
+
+    - name: "[CONNECT] Verify API is reachable"
+      ansible.builtin.uri:
+        url: "{{ truenas_api_url }}/system/info"
+        method: GET
+        headers:
+          Authorization: "{{ truenas_auth_header }}"
+          Content-Type: "application/json"
+        validate_certs: "{{ ssl_verify }}"
+        status_code: 200
+        timeout: 30
+      register: system_info
+      tags: [health, always]
+
+    - name: "[CONNECT] Display system info"
+      ansible.builtin.debug:
+        msg: |
+          ┌─────────────────────────────────────────────────┐
+          │  TrueNAS System: {{ inventory_hostname }}
+          ├─────────────────────────────────────────────────┤
+          │  Hostname    : {{ system_info.json.hostname }}
+          │  Version     : {{ system_info.json.version }}
+          │  Uptime      : {{ system_info.json.uptime }}
+          │  Platform    : {{ system_info.json.system_product | default('N/A') }}
+          │  Serial      : {{ system_info.json.system_serial | default('N/A') }}
+          └─────────────────────────────────────────────────┘
+      tags: [health, always]
+
+  # ---------------------------------------------------------------------------
+  # BLOCK 2 — Health Checks
+  # ---------------------------------------------------------------------------
+
+    - name: "=== HEALTH CHECKS ==="
+      ansible.builtin.debug:
+        msg: "Running health checks on {{ inventory_hostname }}..."
+      tags: health
+
+    # --- Pool Status ---
+    - name: "[HEALTH] Get ZFS pool status"
+      ansible.builtin.uri:
+        url: "{{ truenas_api_url }}/pool"
+        method: GET
+        headers:
+          Authorization: "{{ truenas_auth_header }}"
+          Content-Type: "application/json"
+        validate_certs: "{{ ssl_verify }}"
+        status_code: 200
+      register: pool_status
+      tags: health
+
+    - name: "[HEALTH] Display pool status"
+      ansible.builtin.debug:
+        msg: |
+          Pool: {{ item.name }}
+            Status    : {{ item.status }}
+            Healthy   : {{ item.healthy }}
+            Size      : {{ (item.size / 1073741824) | round(2) }} GB
+            Used      : {{ (item.used / 1073741824) | round(2) }} GB
+            Free      : {{ (item.free / 1073741824) | round(2) }} GB
+            Usage     : {{ ((item.used / item.size) * 100) | round(1) }}%
+            Scan      : {{ item.scan.state | default('N/A') }} — {{ item.scan.end_time | default('never') }}
+      loop: "{{ pool_status.json }}"
+      loop_control:
+        label: "Pool: {{ item.name }}"
+      tags: health
+
+    - name: "[HEALTH] Warn on degraded/faulted pools"
+      ansible.builtin.debug:
+        msg: "⚠️  WARNING: Pool '{{ item.name }}' is {{ item.status }} — INVESTIGATE IMMEDIATELY!"
+      loop: "{{ pool_status.json }}"
+      loop_control:
+        label: "Pool: {{ item.name }}"
+      when: item.status not in ['ONLINE', 'HEALTHY']
+      tags: health
+
+    - name: "[HEALTH] Warn on high pool usage"
+      ansible.builtin.debug:
+        msg: "⚠️  WARNING: Pool '{{ item.name }}' is {{ ((item.used / item.size) * 100) | round(1) }}% full!"
+      loop: "{{ pool_status.json }}"
+      loop_control:
+        label: "Pool: {{ item.name }}"
+      when: ((item.used / item.size) * 100) >= pool_usage_warn_percent
+      tags: health
+
+    # --- Active Alerts ---
+    - name: "[HEALTH] Get active system alerts"
+      ansible.builtin.uri:
+        url: "{{ truenas_api_url }}/alert/list"
+        method: GET
+        headers:
+          Authorization: "{{ truenas_auth_header }}"
+          Content-Type: "application/json"
+        validate_certs: "{{ ssl_verify }}"
+        status_code: 200
+      register: alert_list
+      tags: health
+
+    - name: "[HEALTH] Display active alerts"
+      ansible.builtin.debug:
+        msg: |
+          {% if alert_list.json | length == 0 %}
+          ✅ No active alerts.
+          {% else %}
+          ⚠️  Active Alerts ({{ alert_list.json | length }}):
+          {% for alert in alert_list.json %}
+          - [{{ alert.level }}] {{ alert.formatted | default(alert.text | default('Unknown alert')) }}
+          {% endfor %}
+          {% endif %}
+      tags: health
+
+    # --- Critical Services ---
+    - name: "[HEALTH] Check critical TrueNAS services"
+      ansible.builtin.uri:
+        url: "{{ truenas_api_url }}/service?limit=0"
+        method: GET
+        headers:
+          Authorization: "{{ truenas_auth_header }}"
+          Content-Type: "application/json"
+        validate_certs: "{{ ssl_verify }}"
+        status_code: 200
+      register: services_list
+      tags: health
+
+    - name: "[HEALTH] Display service states"
+      ansible.builtin.debug:
+        msg: |
+          Services:
+          {% for svc in services_list.json %}
+          {% if svc.enable %}
+            [{{ '✅ RUNNING' if svc.state == 'RUNNING' else '❌ STOPPED' }}] {{ svc.service }}
+          {% endif %}
+          {% endfor %}
+      tags: health
+
+    - name: "[HEALTH] Warn on enabled services that are stopped"
+      ansible.builtin.debug:
+        msg: "⚠️  WARNING: Service '{{ item.service }}' is ENABLED but STOPPED!"
+      loop: "{{ services_list.json }}"
+      loop_control:
+        label: "{{ item.service }}"
+      when:
+        - item.enable | bool
+        - item.state != 'RUNNING'
+      tags: health
+
+    # --- SMART Status ---
+    - name: "[HEALTH] Get disk SMART test results"
+      ansible.builtin.uri:
+        url: "{{ truenas_api_url }}/smart/test/results"
+        method: POST
+        headers:
+          Authorization: "{{ truenas_auth_header }}"
+          Content-Type: "application/json"
+        body_format: json
+        body: '{"query-filters": [], "query-options": {"limit": 20}}'
+        validate_certs: "{{ ssl_verify }}"
+        status_code: [200, 422]
+      register: smart_results
+      failed_when: false
+      tags: health
+
+    - name: "[HEALTH] Get disk list for SMART overview"
+      ansible.builtin.uri:
+        url: "{{ truenas_api_url }}/disk?limit=0"
+        method: GET
+        headers:
+          Authorization: "{{ truenas_auth_header }}"
+          Content-Type: "application/json"
+        validate_certs: "{{ ssl_verify }}"
+        status_code: 200
+      register: disk_list
+      tags: health
+
+    - name: "[HEALTH] Display disk overview"
+      ansible.builtin.debug:
+        msg: |
+          Disks ({{ disk_list.json | length }} total):
+          {% for disk in disk_list.json %}
+            {{ disk.name }}: {{ disk.size | filesizeformat }} — {{ disk.model | default('Unknown model') }}
+            {% if disk.serial is defined %}  Serial: {{ disk.serial }}{% endif %}
+          {% endfor %}
+      tags: health
+
+    # --- Replication & Snapshot Tasks ---
+    - name: "[HEALTH] Check replication task status"
+      ansible.builtin.uri:
+        url: "{{ truenas_api_url }}/replication"
+        method: GET
+        headers:
+          Authorization: "{{ truenas_auth_header }}"
+          Content-Type: "application/json"
+        validate_certs: "{{ ssl_verify }}"
+        status_code: 200
+      register: replication_tasks
+      failed_when: false
+      tags: health
+
+    - name: "[HEALTH] Display replication task status"
+      ansible.builtin.debug:
+        msg: |
+          Replication Tasks ({{ replication_tasks.json | length }}):
+          {% for task in replication_tasks.json %}
+            [{{ '✅ ENABLED' if task.enabled else '⏸  DISABLED' }}] {{ task.name }}
+            State: {{ task.state.state | default('N/A') }}
+          {% endfor %}
+      when:
+        - replication_tasks.status == 200
+        - replication_tasks.json | length > 0
+      tags: health
+
+  # ---------------------------------------------------------------------------
+  # BLOCK 3 — Trigger ZFS Scrub (if overdue)
+  # ---------------------------------------------------------------------------
+
+    - name: "=== ZFS SCRUB CHECK ==="
+      ansible.builtin.debug:
+        msg: "Checking if scrubs are needed..."
+      tags: health
+
+    - name: "[SCRUB] Start scrub on pools with no recent scrub"
+      ansible.builtin.uri:
+        url: "{{ truenas_api_url }}/pool/{{ item.id }}/scrub"
+        method: POST
+        headers:
+          Authorization: "{{ truenas_auth_header }}"
+          Content-Type: "application/json"
+        body_format: json
+        body: '{"threshold": {{ scrub_age_warn_days }}}'
+        validate_certs: "{{ ssl_verify }}"
+        status_code: [200, 202]
+      register: scrub_result
+      loop: "{{ pool_status.json | selectattr('status', 'equalto', 'ONLINE') | list }}"
+      loop_control:
+        label: "Pool: {{ item.name }}"
+      failed_when: false
+      tags: health
+
+    - name: "[SCRUB] Display scrub trigger results"
+      ansible.builtin.debug:
+        msg: "Pool '{{ item.item.name }}': scrub {{ 'triggered' if item.status in [200, 202] else 'skipped or already running' }}"
+      loop: "{{ scrub_result.results }}"
+      loop_control:
+        label: "Pool: {{ item.item.name }}"
+      tags: health
+
+  # ---------------------------------------------------------------------------
+  # BLOCK 4 — Check for Updates
+  # ---------------------------------------------------------------------------
+
+    - name: "=== UPDATE CHECK ==="
+      ansible.builtin.debug:
+        msg: "Checking for available TrueNAS updates..."
+      tags: update
+
+    - name: "[UPDATE] Check for available update"
+      ansible.builtin.uri:
+        url: "{{ truenas_api_url }}/update/check_available"
+        method: POST
+        headers:
+          Authorization: "{{ truenas_auth_header }}"
+          Content-Type: "application/json"
+        body_format: json
+        body: '{}'
+        validate_certs: "{{ ssl_verify }}"
+        status_code: 200
+        timeout: 120
+      register: update_available
+      tags: update
+
+    - name: "[UPDATE] Display update availability"
+      ansible.builtin.debug:
+        msg: |
+          Update Status: {{ update_available.json.status }}
+          {% if update_available.json.status == 'AVAILABLE' %}
+          Available Version : {{ update_available.json.version | default('N/A') }}
+          Release Notes     : {{ update_available.json.changelog | default('See TrueNAS release notes') | truncate(200) }}
+          {% elif update_available.json.status == 'UNAVAILABLE' %}
+          ✅ System is already up to date.
+          {% else %}
+          Status details: {{ update_available.json | to_nice_json }}
+          {% endif %}
+      tags: update
+
+    - name: "[UPDATE] Skip update if none available"
+      ansible.builtin.debug:
+        msg: "No update available — skipping update steps."
+      when: update_available.json.status != 'AVAILABLE'
+      tags: update
+
+  # ---------------------------------------------------------------------------
+  # BLOCK 5 — Apply Update
+  # ---------------------------------------------------------------------------
+
+    - name: "=== APPLYING UPDATE ==="
+      ansible.builtin.debug:
+        msg: "Applying TrueNAS update — this may take several minutes..."
+      when: update_available.json.status == 'AVAILABLE'
+      tags: update
+
+    - name: "[UPDATE] Download and apply update"
+      ansible.builtin.uri:
+        url: "{{ truenas_api_url }}/update/update"
+        method: POST
+        headers:
+          Authorization: "{{ truenas_auth_header }}"
+          Content-Type: "application/json"
+        body_format: json
+        body: '{"reboot": false}'   # We control reboot separately
+        validate_certs: "{{ ssl_verify }}"
+        status_code: 200
+        timeout: 60
+      register: update_job
+      when: update_available.json.status == 'AVAILABLE'
+      tags: update
+
+    - name: "[UPDATE] Poll update job until complete"
+      ansible.builtin.uri:
+        url: "{{ truenas_api_url }}/core/get_jobs?id={{ update_job.json }}"
+        method: GET
+        headers:
+          Authorization: "{{ truenas_auth_header }}"
+          Content-Type: "application/json"
+        validate_certs: "{{ ssl_verify }}"
+        status_code: 200
+      register: update_job_status
+      until: >-
+        update_job_status.json | length > 0 and
+        update_job_status.json[0].state in ['SUCCESS', 'FAILED', 'ABORTED']
+      retries: "{{ update_check_retries }}"
+      delay: "{{ update_check_delay }}"
+      when:
+        - update_available.json.status == 'AVAILABLE'
+        - update_job is defined
+        - update_job.json is defined
+      tags: update
+
+    - name: "[UPDATE] Confirm update result"
+      ansible.builtin.debug:
+        msg: |
+          Update Job Result:
+            State   : {{ update_job_status.json[0].state }}
+            Progress: {{ update_job_status.json[0].progress.percent | default(100) }}%
+            Message : {{ update_job_status.json[0].progress.description | default('Completed') }}
+      when:
+        - update_available.json.status == 'AVAILABLE'
+        - update_job_status is defined
+        - update_job_status.json is defined
+      tags: update
+
+    - name: "[UPDATE] Fail if update job failed"
+      ansible.builtin.fail:
+        msg: "TrueNAS update job FAILED on {{ inventory_hostname }}. Check the TrueNAS UI for details."
+      when:
+        - update_available.json.status == 'AVAILABLE'
+        - update_job_status is defined
+        - update_job_status.json is defined
+        - update_job_status.json[0].state == 'FAILED'
+      tags: update
+
+  # ---------------------------------------------------------------------------
+  # BLOCK 6 — Safe Reboot
+  # ---------------------------------------------------------------------------
+
+    - name: "=== REBOOT HANDLING ==="
+      ansible.builtin.debug:
+        msg: "Evaluating reboot necessity..."
+      tags: reboot
+
+    - name: "[REBOOT] Set reboot_needed fact"
+      ansible.builtin.set_fact:
+        reboot_needed: >-
+          {{
+            (update_available is defined and update_available.json.status == 'AVAILABLE') and
+            (update_job_status is defined and
+             update_job_status.json is defined and
+             update_job_status.json[0].state == 'SUCCESS')
+          }}
+      tags: reboot
+
+    - name: "[REBOOT] Check for active CIFS/NFS/iSCSI sessions before reboot"
+      ansible.builtin.uri:
+        url: "{{ truenas_api_url }}/smb/status"
+        method: GET
+        headers:
+          Authorization: "{{ truenas_auth_header }}"
+          Content-Type: "application/json"
+        validate_certs: "{{ ssl_verify }}"
+        status_code: [200, 405, 404]
+      register: smb_status
+      failed_when: false
+      when: reboot_needed | bool
+      tags: reboot
+
+    - name: "[REBOOT] Check active NFS sessions"
+      ansible.builtin.uri:
+        url: "{{ truenas_api_url }}/nfs/get_nfs_info"
+        method: GET
+        headers:
+          Authorization: "{{ truenas_auth_header }}"
+          Content-Type: "application/json"
+        validate_certs: "{{ ssl_verify }}"
+        status_code: [200, 405, 404]
+      register: nfs_status
+      failed_when: false
+      when: reboot_needed | bool
+      tags: reboot
+
+    - name: "[REBOOT] Warn about active sessions"
+      ansible.builtin.debug:
+        msg: |
+          ⚠️  Active sessions may be disrupted by reboot!
+          Proceeding in {{ pre_reboot_delay }} seconds...
+          Ensure clients are aware of the maintenance window.
+      when:
+        - reboot_needed | bool
+        - allow_reboot | bool
+      tags: reboot
+
+    - name: "[REBOOT] Initiate reboot via API"
+      ansible.builtin.uri:
+        url: "{{ truenas_api_url }}/system/reboot"
+        method: POST
+        headers:
+          Authorization: "{{ truenas_auth_header }}"
+          Content-Type: "application/json"
+        body_format: json
+        body: '{"delay": {{ pre_reboot_delay }}}'
+        validate_certs: "{{ ssl_verify }}"
+        status_code: [200, 202]
+        timeout: 30
+      register: reboot_triggered
+      when:
+        - reboot_needed | bool
+        - allow_reboot | bool
+      tags: reboot
+
+    - name: "[REBOOT] Wait for TrueNAS to go offline"
+      ansible.builtin.wait_for:
+        host: "{{ ansible_host }}"
+        port: 443
+        state: stopped
+        timeout: 120
+        delay: "{{ pre_reboot_delay + 5 }}"
+      when:
+        - reboot_needed | bool
+        - allow_reboot | bool
+        - reboot_triggered is defined
+        - reboot_triggered.status in [200, 202]
+      tags: reboot
+
+    - name: "[REBOOT] Wait for TrueNAS to come back online"
+      ansible.builtin.wait_for:
+        host: "{{ ansible_host }}"
+        port: 443
+        state: started
+        timeout: "{{ reboot_timeout }}"
+        delay: 30
+      when:
+        - reboot_needed | bool
+        - allow_reboot | bool
+        - reboot_triggered is defined
+        - reboot_triggered.status in [200, 202]
+      tags: reboot
+
+    - name: "[REBOOT] Pause for services to fully initialize"
+      ansible.builtin.pause:
+        seconds: 30
+        prompt: "Waiting 30s for TrueNAS services to initialize after reboot..."
+      when:
+        - reboot_needed | bool
+        - allow_reboot | bool
+        - reboot_triggered is defined
+        - reboot_triggered.status in [200, 202]
+      tags: reboot
+
+    - name: "[REBOOT] Confirm system is responsive after reboot"
+      ansible.builtin.uri:
+        url: "{{ truenas_api_url }}/system/info"
+        method: GET
+        headers:
+          Authorization: "{{ truenas_auth_header }}"
+          Content-Type: "application/json"
+        validate_certs: "{{ ssl_verify }}"
+        status_code: 200
+        timeout: 30
+      register: post_reboot_info
+      retries: 5
+      delay: 15
+      until: post_reboot_info.status == 200
+      when:
+        - reboot_needed | bool
+        - allow_reboot | bool
+        - reboot_triggered is defined
+        - reboot_triggered.status in [200, 202]
+      tags: reboot
+
+    - name: "[REBOOT] Display post-reboot version"
+      ansible.builtin.debug:
+        msg: |
+          ✅ {{ inventory_hostname }} is back online!
+          Version : {{ post_reboot_info.json.version }}
+          Uptime  : {{ post_reboot_info.json.uptime }}
+      when:
+        - reboot_needed | bool
+        - allow_reboot | bool
+        - post_reboot_info is defined
+        - post_reboot_info.status is defined
+        - post_reboot_info.status == 200
+      tags: reboot
+
+    - name: "[REBOOT] Notify reboot skipped"
+      ansible.builtin.debug:
+        msg: |
+          ℹ️  Reboot skipped for {{ inventory_hostname }}.
+          Reason: {{ 'allow_reboot is false' if not allow_reboot else 'No update was applied' }}
+          If an update was applied, please schedule a manual reboot.
+      when: not reboot_needed | bool or not allow_reboot | bool
+      tags: reboot
+
+  # ---------------------------------------------------------------------------
+  # BLOCK 7 — Post-Reboot Health Validation
+  # ---------------------------------------------------------------------------
+
+    - name: "=== POST-MAINTENANCE VALIDATION ==="
+      ansible.builtin.debug:
+        msg: "Running final validation checks..."
+      tags: [reboot, report]
+
+    - name: "[VALIDATE] Re-check pool health after reboot"
+      ansible.builtin.uri:
+        url: "{{ truenas_api_url }}/pool"
+        method: GET
+        headers:
+          Authorization: "{{ truenas_auth_header }}"
+          Content-Type: "application/json"
+        validate_certs: "{{ ssl_verify }}"
+        status_code: 200
+      register: final_pool_status
+      tags: [reboot, report]
+
+    - name: "[VALIDATE] Confirm all pools are ONLINE"
+      ansible.builtin.debug:
+        msg: "Pool '{{ item.name }}': {{ item.status }} — {{ '✅ OK' if item.status == 'ONLINE' else '❌ NEEDS ATTENTION' }}"
+      loop: "{{ final_pool_status.json }}"
+      loop_control:
+        label: "Pool: {{ item.name }}"
+      tags: [reboot, report]
+
+    - name: "[VALIDATE] Re-check alerts after maintenance"
+      ansible.builtin.uri:
+        url: "{{ truenas_api_url }}/alert/list"
+        method: GET
+        headers:
+          Authorization: "{{ truenas_auth_header }}"
+          Content-Type: "application/json"
+        validate_certs: "{{ ssl_verify }}"
+        status_code: 200
+      register: final_alerts
+      tags: [reboot, report]
+
+    - name: "[VALIDATE] Display post-maintenance alert count"
+      ansible.builtin.debug:
+        msg: "{{ '✅ No active alerts.' if final_alerts.json | length == 0 else '⚠️  ' + (final_alerts.json | length | string) + ' alert(s) still active — review in TrueNAS UI.' }}"
+      tags: [reboot, report]
+
+  # ---------------------------------------------------------------------------
+  # BLOCK 8 — Final Report
+  # ---------------------------------------------------------------------------
+
+    - name: "=== FINAL REPORT ==="
+      ansible.builtin.debug:
+        msg: |
+          ╔══════════════════════════════════════════════════════════╗
+          ║       TrueNAS Maintenance Report                        ║
+          ╠══════════════════════════════════════════════════════════╣
+          ║  Host          : {{ inventory_hostname }}
+          ║  Date          : {{ ansible_date_time.iso8601 }}
+          ║  Version       : {{ system_info.json.version }}
+          ╠══════════════════════════════════════════════════════════╣
+          ║  UPDATE SUMMARY
+          ║  Update checked   : ✅ Yes
+          ║  Update available : {{ update_available.json.status }}
+          ║  Update applied   : {{ 'Yes' if (update_job_status is defined and update_job_status.json is defined and update_job_status.json[0].state == 'SUCCESS') else 'No' }}
+          ║  Rebooted         : {{ 'Yes' if (reboot_triggered is defined and reboot_triggered.status is defined and reboot_triggered.status in [200, 202]) else 'No' }}
+          ╠══════════════════════════════════════════════════════════╣
+          ║  POOL HEALTH
+          {% for pool in final_pool_status.json %}
+          ║  {{ pool.name }}: {{ pool.status }} — {{ ((pool.used / pool.size) * 100) | round(1) }}% used
+          {% endfor %}
+          ╠══════════════════════════════════════════════════════════╣
+          ║  ALERTS         : {{ final_alerts.json | length }} active
+          ╚══════════════════════════════════════════════════════════╝
+      tags: [report, always]
